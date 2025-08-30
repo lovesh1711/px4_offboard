@@ -58,7 +58,7 @@ class OffboardControl(Node):
         self.publisher_velocity = self.create_publisher(
             Twist, '/fmu/in/setpoint_velocity/cmd_vel_unstamped', qos_profile)
 
-        self.publisher_trajectory = self.create_publisher(              # ✅ back to TrajectorySetpoint
+        self.publisher_trajectory = self.create_publisher(              
             TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_profile)
 
         self.vehicle_command_publisher_ = self.create_publisher(
@@ -89,8 +89,8 @@ class OffboardControl(Node):
 
         # Mission
         self.mission_stage = "IDLE"  # ASCEND → CRUISE → LAND → DONE
-        self.target_ned = np.array([0.0, 0.0, -10.0], dtype=float)  # default first target
-        # self.target_v = np.array([0.0, 0.0, 0.0], dtype=float)  # default first target
+        self.target_ned = np.array([0.0, 0.0, -20.0], dtype=float)  # default first target
+        self.target_v = np.array([0.0, 0.0, -1.0], dtype=float)  # default first target
     
         self.target_reached_once = False  # for debouncing
         self.sent_land = False
@@ -149,7 +149,7 @@ class OffboardControl(Node):
                     self.current_state = "IDLE"
                     self.get_logger().info("Offboard, Flight Check Failed")
                 else:
-                    # Prime TrajectorySetpoint before switching to OFFBOARD
+                    
                     self.state_offboard()
 
         if self.arm_state != VehicleStatus.ARMING_STATE_ARMED:
@@ -166,8 +166,8 @@ class OffboardControl(Node):
         if not self.offboardMode:
             self.mission_stage = "ASCEND"
             # status_forward=True
-            self.target_ned = np.array([0.0, 0.0, -10.0], dtype=float)
-            # self.target_v = np.array([0.0, 0.0, 0.0], dtype=float)
+            self.target_ned = np.array([0.0, 0.0, -20.0], dtype=float)
+            self.target_v = np.array([0.0, 0.0, -1.0], dtype=float)
             self.target_reached_once = False
             self.sent_land = False
 
@@ -175,8 +175,8 @@ class OffboardControl(Node):
             for _ in range(20):  # ~0.4 s at 50 Hz
                 # status_forward=True
                 self.publish_offboard_mode(position=True, velocity=False)
-                # self.publish_trajectory_setpoint(self.target_ned,self.target_v, yaw=0.0)
-                self.publish_trajectory_setpoint(self.target_ned, yaw=0.0)
+                
+                self.publish_trajectory_setpoint(self.target_ned, self.target_v, yaw=0.0)
 
             # Switch to OFFBOARD (MAVLink base mode 1, custom 6)
             self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_DO_SET_MODE, 1., 6.)
@@ -185,7 +185,7 @@ class OffboardControl(Node):
 
     def arm(self):
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, 1.0)
-        self.get_logger().info("Arm command sent")
+        # self.get_logger().info("Arm command sent")
 
     def take_off(self):
         # param7 = target altitude AMSL for GPS; in local sim it still initiates auto takeoff
@@ -234,7 +234,12 @@ class OffboardControl(Node):
         if now-self.last_log_time>=1.0:
             self.get_logger().info(
                 f"Measured velocity: vx={msg.vx:.2f}, vy={msg.vy:.2f}, vz={msg.vz:.2f}"
+                f"Measured position: x={msg.x:.2f}, y={msg.y:.2f}, z={msg.z:.2f}"
+
             )
+            # self.get_logger().info(
+            #     f"commanded velocity: velx={self.velocity.x:.2f}, vely={self.velocity.y:.2f}, velz={self.velocity.z:.2f}"
+            # )
             self.last_log_time = now
 
     def offboard_velocity_callback(self, msg):
@@ -244,20 +249,30 @@ class OffboardControl(Node):
         self.velocity.z = -msg.linear.z
         self.yaw = msg.angular.z
 
-    # def publish_velocity_setpoint(self, vx, vy, vz, yaw=None, yawspeed=None):
-    #     msg=TrajectorySetpoint()
-    #     msg.timestamp=int(Clock().now().nanoseconds/1000)
-    #     msg.position[:]      = [np.nan, np.nan, np.nan]
-    #     msg.velocity[:]      = [float(vx), float(vy), float(vz)]
-    #     msg.acceleration[:]  = [np.nan, np.nan, np.nan]
-    #     msg.jerk[:]          = [np.nan, np.nan, np.nan]
-    #     if yawspeed is not None:
-    #         msg.yaw=np.nan
-    #         msg.yawspeed=float(yawspeed)
-    #     else:
-    #         msg.yaw=float(yaw) if yaw is not None else 0.0
-    #         msg.yawspeed=np.nan
-    #     self.publisher_trajectory.publish(msg)
+        # now=time.time()
+        # if now-self.last_log_time>=1.0:
+        #     self.get_logger().info(
+        #         f"commanded velocity: velx={self.velocity.x:.2f}, vely={self.velocity.y:.2f}, velz={self.velocity.z:.2f}"
+        #     )
+            # self.last_log_time = now
+        
+    def publish_velocity_setpoint(self, target_v, yaw=0.0):
+        msg = TrajectorySetpoint()
+        msg.timestamp = int(Clock().now().nanoseconds / 1000)
+
+        # Disable position control (set to NaN)
+        msg.position[0] = float('nan')
+        msg.position[1] = float('nan')
+        msg.position[2] = float('nan')
+
+        # Set velocity feedforward
+        msg.velocity[0] = float(target_v[0])  # vx (N)
+        msg.velocity[1] = float(target_v[1])  # vy (E)
+        msg.velocity[2] = float(target_v[2])  # vz (Down, negative = up)
+
+        msg.yaw = float(yaw)
+        self.publisher_trajectory.publish(msg)
+
         
 
     def attitude_callback(self, msg):
@@ -265,13 +280,13 @@ class OffboardControl(Node):
         self.trueYaw = -(np.arctan2(2.0*(q[3]*q[0] + q[1]*q[2]),
                                     1.0 - 2.0*(q[0]*q[0] + q[1]*q[1])))
 
-    def publish_twist_velocity(self, vx, vy, vz, yawrate=0.0):
-        msg=Twist()
-        msg.linear.x=vx
-        msg.linear.y=vy
-        msg.linear.z=vz
-        msg.angular.z=yawrate
-        self.publisher_velocity.publish(msg)
+    # def publish_twist_velocity(self, vx, vy, vz, yawrate=0.0):
+    #     msg=Twist()
+    #     msg.linear.x=vx
+    #     msg.linear.y=vy
+    #     msg.linear.z=vz
+    #     msg.angular.z=yawrate
+    #     self.publisher_velocity.publish(msg)
 
     # ───────────────────────────────────────────────────────────────────────────
     # Command loop: send setpoints + mission FSM 
@@ -284,14 +299,11 @@ class OffboardControl(Node):
         # Always publish OffboardControlMode at control rate
         self.publish_offboard_mode(position=True)
 
-        # self.publish_mode_velocity()
-        # vx, vy, vz = self.velocity.x, self.velocity.y, self.velocity.z
-        # yawrate     = self.yaw
-
-        # If we don't have a valid position yet, just hold latest target
+    
         if not (self.pos_valid_xy and self.pos_valid_z):
-            # self.publish_trajectory_setpoint(self.target_ned, self.target_v, yaw=0.0)
-            self.publish_trajectory_setpoint(self.target_ned, yaw=0.0)
+            self.publish_offboard_mode(position=True)
+            self.publish_velocity_setpoint([0.0, 0.0, 0.0], yaw=0.0)
+            self.publish_trajectory_setpoint(self.target_ned,self.target_v , yaw=0.0)
             return
         
     
@@ -305,14 +317,22 @@ class OffboardControl(Node):
         dist_xy = np.hypot(dx, dy)
         dist_z = abs(dz)
 
-        # self.get_logger().info("Velocity", self.velocity.x)
+        # self.get_logger().info("Velocity", self.velocity.x) 
         # ── Mission stages ─────────────────────────────────────────────────────
         if self.mission_stage == "ASCEND":
             
             # target: (0, 0, -15)
             
-            self.target_ned[:] = [0.0, 0.0, -10.0]
             
+            # self.target_ned[:] = [0.0, 0.0, -20.0]
+            self.publish_offboard_mode(position=True)
+            self.target_ned[:] = [0.0, 0.0, -20.0]
+            self.target_v[:] = [0.0, 0.0, -1.0]
+            self.publish_trajectory_setpoint(self.target_ned, self.target_v)
+            # self.publish_velocity_setpoint([0.0, 0.0, -1.0])
+            # self.target_v[:] = [0.0, 0.0, -1.0]
+            
+            # self.get_logger().info("going to cruise altitude")
             if dist_xy < self.xy_thresh and dist_z < self.z_thresh:
                 if not self.target_reached_once:
                     # small debounce to avoid flicker at threshold
@@ -320,29 +340,43 @@ class OffboardControl(Node):
                 else:
                     self.mission_stage = "CRUISE"
                     self.target_reached_once = False
-                    self.get_logger().info("Reached (0,0,-15). Proceeding to (10,10,-15).")
+                    self.get_logger().info("ascending done, now going to cruise")
                    
             else:
                 self.target_reached_once = False
 
         elif self.mission_stage == "CRUISE":
             # target: (10, 10, -15)
-            self.target_ned[:] = [10.0, 0.0, -10.0]
             
-           
+            
+
+            self.publish_offboard_mode(position=True)
+            self.target_ned[:] = [10.0, 0.0, -20.0]
+            
+            self.target_v[:] = [1.0, 0.0, 0.0]
+            self.publish_trajectory_setpoint(self.target_ned, self.target_v)
+            # self.publish_velocity_setpoint([1.0, 0.0, 0.0])
+            # self.target_v[:] = [1.0, 0.0, 0.0]
+            # self.get_logger().info("cruising to target point")
             if dist_xy < self.xy_thresh and dist_z < self.z_thresh:
                 if not self.target_reached_once:
                     self.target_reached_once = True
                 else:
                     self.mission_stage = "DESCEND"
                     self.target_reached_once = False
-                    self.get_logger().info("Reached (10,10,-15). descending to 3m.")
+                    self.get_logger().info("target point reached, now desceding to 3m")
                     
             else:
                 self.target_reached_once = False
 
         elif self.mission_stage == "DESCEND":
+            
+            # self.publish_velocity_setpoint([0.0, 0.0, 1.0])
+            self.publish_offboard_mode(position=True)
             self.target_ned[:] = [10.0, 0.0, -3.0]
+            self.target_v[:] = [0.0, 0.0, 1.0]
+            self.publish_trajectory_setpoint(self.target_ned, self.target_v)
+            
             # self.target_v[:]=[0.0,0.0,2.0]
             if dist_xy < self.xy_thresh and dist_z < self.z_thresh:
                 if not self.target_reached_once:
@@ -351,65 +385,81 @@ class OffboardControl(Node):
                     self.mission_stage = "WAIT"
                     self.target_reached_once = False
                     self.wait_start_time = self.get_clock().now().nanoseconds / 1e9
-                    self.get_logger().info("Reached (10,10,-3). Holding for 3 seconds.")
+                    self.get_logger().info("reached 3m altitude to drop, Holding for 3 seconds.")
             else:
                 self.target_reached_once = False
 
         elif self.mission_stage == "WAIT":
             # Hold position at (10, 10, -3)
             # self.get_logger().info("wait command sent")
+            self.publish_velocity_setpoint([0.0, 0.0, 0.0])
+            self.publish_offboard_mode(position=True)
+            
             self.target_ned[:] = [10.0, 0.0, -3.0]
+            # self.target_v[:] = [0.0, 0.0, 0.0]
+            # self.publish_trajectory_setpoint(self.target_ned, self.target_v)
+            self.get_logger().info("Waiting abhi toh")
             elapsed = self.get_clock().now().nanoseconds / 1e9 - self.wait_start_time
             if elapsed >= 5.0:
                 self.mission_stage = "ASCEND_back"
                 self.target_reached_once = False
-                self.get_logger().info("Wait complete. Ascending back to (10,10,-15).")
+                self.get_logger().info("Wait complete. ascending to cruising altitude")
 
-        elif self.mission_stage == "ASCEND_back":
+        # elif self.mission_stage == "ASCEND_back":
             
-            # target: (0, 0, -15)
-            self.target_ned[:] = [10.0, 0.0, -10.0]
-            # self.target_v[:]=[0.0,0.0,-2]
-            if dist_xy < self.xy_thresh and dist_z < self.z_thresh:
-                if not self.target_reached_once:
-                    # small debounce to avoid flicker at threshold
-                    self.target_reached_once = True
-                else:
-                    self.mission_stage = "CRUISE_back"
-                    self.target_reached_once = False
-                    self.get_logger().info("Reached (10,10,-15). cruising back to (0,0,-15).")
-            else:
-                self.target_reached_once = False
+        #     # target: (0, 0, -15)
+        #     # self.publish_offboard_mode(position=False, velocity=True)
+        #     self.publish_offboard_mode(position=True)
+        #     self.publish_velocity_setpoint([0.0, 0.0, 1.0])
+        #     self.target_ned[:] = [10.0, 0.0, -20.0]
+        #     self.target_v[:] = [0.0, 0.0, -1.0]
+        #     # self.publish_trajectory_setpoint(self.target_ned, self.target_v)
+        #     # self.target_v[:]=[0.0,0.0,-2]
+        #     if dist_xy < self.xy_thresh and dist_z < self.z_thresh:
+        #         if not self.target_reached_once:
+        #             # small debounce to avoid flicker at threshold
+        #             self.target_reached_once = True
+        #         else:
+        #             self.mission_stage = "CRUISE_back"
+        #             self.target_reached_once = False
+        #             self.get_logger().info("Reached (10,10,-15). cruising back to (0,0,-15).")
+        #     else:
+        #         self.target_reached_once = False
 
-        elif self.mission_stage == "CRUISE_back":
-            # target: (10, 10, -15)
-            self.target_ned[:] = [0.0, 0.0, -10.0]
-            # self.target_v[:]=[5.0,5.0,0.0]
-            if dist_xy < self.xy_thresh and dist_z < self.z_thresh:
-                if not self.target_reached_once:
-                    self.target_reached_once = True
-                else:
-                    self.mission_stage = "LAND"
-                    self.target_reached_once = False
-                    self.get_logger().info("Reached (0,0,-15).landing command sent")
-            else:
-                self.target_reached_once = False
+        # elif self.mission_stage == "CRUISE_back":
+        #     # target: (10, 10, -15)
+        #     # self.publish_offboard_mode(position=False, velocity=True)
+        #     self.publish_offboard_mode(position=True)
+        #     self.publish_velocity_setpoint([1.0, 0.0, 0.0])
+        #     self.target_ned[:] = [0.0, 0.0, -20.0]
+        #     self.target_v[:] = [1.0, 0.0, 0.0]
+        #     # self.publish_trajectory_setpoint(self.target_ned, self.target_v)
+        #     # self.target_v[:]=[5.0,5.0,0.0]
+        #     if dist_xy < self.xy_thresh and dist_z < self.z_thresh:
+        #         if not self.target_reached_once:
+        #             self.target_reached_once = True
+        #         else:
+        #             self.mission_stage = "LAND"
+        #             self.target_reached_once = False
+        #             self.get_logger().info("Reached (0,0,-15).landing command sent")
+        #     else:
+        #         self.target_reached_once = False
 
         
 
-        elif self.mission_stage == "LAND":
-            if not self.sent_land:
-                self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
-                self.sent_land = True
-                self.get_logger().info("Landing command sent.")
-            # keep target steady until PX4 switches modes
-            self.target_ned[:] = [self.pos_ned[0], self.pos_ned[1], self.pos_ned[2]]
+        # elif self.mission_stage == "LAND":
+        #     if not self.sent_land:
+        #         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+        #         self.sent_land = True
+        #         self.get_logger().info("Landing command sent.")
+        #     # keep target steady until PX4 switches modes
+        #     self.target_ned[:] = [self.pos_ned[0], self.pos_ned[1], self.pos_ned[2]]
             
         
 
-        # Publish the current target as TrajectorySetpoint
+        
+    
         # self.publish_trajectory_setpoint(self.target_ned, self.target_v, yaw=0.0)
-        self.publish_trajectory_setpoint(self.target_ned, yaw=0.0)
 
     # ───────────────────────────────────────────────────────────────────────────
     # Helpers
@@ -424,16 +474,16 @@ class OffboardControl(Node):
     
    
 
-    def publish_trajectory_setpoint(self, target_ned, yaw=0.0):
+    def publish_trajectory_setpoint(self, target_ned, target_v, yaw=0.0):
         msg = TrajectorySetpoint()
         msg.timestamp = int(Clock().now().nanoseconds / 1000)
         msg.position[0] = float(target_ned[0])  # x (N)
         msg.position[1] = float(target_ned[1])  # y (E)
         msg.position[2] = float(target_ned[2])  # z (Down, negative = up)
 
-        # msg.velocity[0] = float(target_v[0])  # vx (N)
-        # msg.velocity[1] = float(target_v[1])  # vy (E)
-        # msg.velocity[2] = float(target_v[2])  # vz (Down, negative = up)
+        msg.velocity[0] = float(target_v[0])  # vx (N)
+        msg.velocity[1] = float(target_v[1])  # vy (E)
+        msg.velocity[2] = float(target_v[2])  # vz (Down, negative = up)
 
         msg.yaw = float(yaw)
         self.publisher_trajectory.publish(msg)
